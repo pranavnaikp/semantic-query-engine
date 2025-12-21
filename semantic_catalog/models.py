@@ -155,41 +155,50 @@ class Relationship(BaseModel):
         return f"{join_type} {self.to_entity} {to_alias} ON {' AND '.join(conditions)}"
 
 
+
+# semantic_catalog/models.py (UPDATED)
+
 class Entity(BaseModel):
     """
-    An entity represents a business concept (like a database table).
+    An entity represents a business concept with full database qualification.
     """
     name: str = Field(..., description="Unique name of the entity")
     description: str = Field("", description="Human-readable description")
+    schema_name: str = Field("public", description="Database schema name")
     table_name: str = Field(..., description="Physical table name in database")
+    alias_prefix: str = Field("e", description="Prefix for table aliases")
     
-    # Primary key column (optional, used for certain optimizations)
+    # Primary key column
     primary_key: Optional[str] = Field(None, description="Primary key column name")
     
-    # Dimensions and metrics belonging to this entity
-    dimensions: Dict[str, Dimension] = Field(default_factory=dict)
-    metrics: Dict[str, Metric] = Field(default_factory=dict)
+    # Database-specific quoting
+    quote_identifiers: bool = Field(True, description="Whether to quote identifiers")
     
-    # Relationships to other entities
-    relationships: Dict[str, Relationship] = Field(default_factory=dict)
+    @property
+    def fully_qualified_table(self) -> str:
+        """Get fully qualified table name: schema.table_name"""
+        if self.quote_identifiers:
+            return f'"{self.schema_name}"."{self.table_name}"'
+        return f"{self.schema_name}.{self.table_name}"
     
-    def add_dimension(self, dimension: Dimension) -> None:
-        """Add a dimension to this entity."""
-        if dimension.entity_name != self.name:
-            raise ValueError(f"Dimension belongs to entity {dimension.entity_name}, not {self.name}")
-        self.dimensions[dimension.name] = dimension
+    def get_alias(self, index: int = 0) -> str:
+        """Get unique table alias for this entity."""
+        return f"{self.alias_prefix}_{index}"
     
-    def add_metric(self, metric: Metric) -> None:
-        """Add a metric to this entity."""
-        if metric.entity_name != self.name:
-            raise ValueError(f"Metric belongs to entity {metric.entity_name}, not {self.name}")
-        self.metrics[metric.name] = metric
+    def quote_column(self, column_name: str) -> str:
+        """Get quoted column name if needed."""
+        if self.quote_identifiers:
+            return f'"{column_name}"'
+        return column_name
     
-    def add_relationship(self, relationship: Relationship) -> None:
-        """Add a relationship to this entity."""
-        self.relationships[relationship.name] = relationship
-
-
+    def get_qualified_column(self, column_name: str, alias: Optional[str] = None) -> str:
+        """Get fully qualified column: alias.column or table.column"""
+        col = self.quote_column(column_name)
+        if alias:
+            return f"{alias}.{col}"
+        return f"{self.fully_qualified_table}.{col}"
+    
+    
 class SemanticCatalog(BaseModel):
     """
     The main catalog storing all semantic definitions.
