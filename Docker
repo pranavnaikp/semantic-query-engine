@@ -1,0 +1,73 @@
+# docker-compose.yml - UPDATED
+
+version: '3.8'
+
+services:
+  # Main database with multiple schemas
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_MULTIPLE_DATABASES: sales_db,analytics_db,ref_db
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: admin123
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./sql/init-multi-schema.sql:/docker-entrypoint-initdb.d/init.sql
+  
+  # Schema-specific services (optional for microservices)
+  sales-db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: sales_db
+      POSTGRES_USER: sales_user
+      POSTGRES_PASSWORD: sales_pass
+    ports:
+      - "5433:5432"
+  
+  analytics-db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: analytics_db
+      POSTGRES_USER: analytics_user
+      POSTGRES_PASSWORD: analytics_pass
+    ports:
+      - "5434:5432"
+  
+  semantic-engine:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      # Sales schema connection
+      SALES_DB_HOST: postgres
+      SALES_DB_PORT: 5432
+      SALES_DB_NAME: sales_db
+      SALES_DB_USER: sales_user
+      SALES_DB_PASSWORD: sales_pass
+      
+      # Analytics schema connection
+      ANALYTICS_DB_HOST: postgres
+      ANALYTICS_DB_PORT: 5432
+      ANALYTICS_DB_NAME: analytics_db
+      ANALYTICS_DB_USER: analytics_user
+      ANALYTICS_DB_PASSWORD: analytics_pass
+      
+      # Reference schema connection
+      REF_DB_HOST: postgres
+      REF_DB_PORT: 5432
+      REF_DB_NAME: ref_db
+      REF_DB_USER: ref_user
+      REF_DB_PASSWORD: ref_pass
+      
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      DEBUG: "true"
+    depends_on:
+      - postgres
+    volumes:
+      - .:/app
+    command: uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+volumes:
+  postgres_data:
