@@ -12,6 +12,9 @@ from langchain.prompts import ChatPromptTemplate
 from langchain.chat_models import ChatOpenAI
 
 from intent_extractor.intent_models import QueryIntent, IntentExtractionResponse
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 class IntentExtractor:

@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  # PostgreSQL (optional - only if you want real database)
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: semantic_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+  
+  # Semantic Analytics MVP
+  semantic-mvp:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DB_HOST: postgres
+      DB_NAME: semantic_db
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}  # Optional
+      DEBUG: "true"
+      ENABLE_MOCK_DATA: "false"  # Use real database
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data:

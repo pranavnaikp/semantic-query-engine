@@ -1,0 +1,101 @@
+# Base semantic model definitions in YAML format
+# Can be loaded at runtime or used as templates
+
+version: "2.0.0"
+description: "Base semantic models for analytics"
+
+entities:
+  - name: "users"
+    description: "Users/Customers of the platform"
+    schema_name: "public"
+    table_name: "users"
+    alias_prefix: "u"
+    primary_key: "id"
+    dimensions:
+      - name: "user_id"
+        description: "Unique user identifier"
+        data_type: "number"
+        column_name: "id"
+      
+      - name: "country"
+        description: "User's country"
+        data_type: "string"
+        column_name: "country_code"
+      
+      - name: "registration_date"
+        description: "Date user registered"
+        data_type: "date"
+        column_name: "created_at"
+        sql_expression: "DATE(created_at)"
+      
+      - name: "user_segment"
+        description: "User segmentation"
+        data_type: "string"
+        column_name: "segment"
+    
+    metrics:
+      - name: "user_count"
+        description: "Total number of users"
+        aggregation: "count"
+        sql_expression: "id"
+        time_dimension: "registration_date"
+        format: "number"
+
+  - name: "orders"
+    description: "Customer orders"
+    schema_name: "sales"
+    table_name: "orders"
+    alias_prefix: "o"
+    primary_key: "id"
+    dimensions:
+      - name: "order_id"
+        description: "Unique order identifier"
+        data_type: "number"
+        column_name: "id"
+      
+      - name: "order_date"
+        description: "Date order was placed"
+        data_type: "date"
+        column_name: "created_at"
+        sql_expression: "DATE(created_at)"
+      
+      - name: "order_status"
+        description: "Status of the order"
+        data_type: "string"
+        column_name: "status"
+      
+      - name: "product_category"
+        description: "Category of product ordered"
+        data_type: "string"
+        column_name: "category"
+    
+    metrics:
+      - name: "revenue"
+        description: "Total revenue (gross)"
+        aggregation: "sum"
+        sql_expression: "amount"
+        time_dimension: "order_date"
+        format: "currency"
+      
+      - name: "net_profit"
+        description: "Net profit after costs"
+        aggregation: "sum"
+        sql_expression: "amount - cost"
+        time_dimension: "order_date"
+        format: "currency"
+      
+      - name: "order_count"
+        description: "Total number of orders"
+        aggregation: "count"
+        sql_expression: "id"
+        time_dimension: "order_date"
+        format: "number"
+
+relationships:
+  - name: "orders_to_users"
+    from_entity: "orders"
+    to_entity: "users"
+    relationship_type: "many_to_one"
+    join_conditions:
+      - left: "user_id"
+        right: "id"

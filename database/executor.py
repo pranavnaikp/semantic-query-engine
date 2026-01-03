@@ -1,202 +1,178 @@
-# database/executor.py - UPDATED FOR SCHEMAS
+"""
+SIMPLIFIED MVP: PostgreSQL query executor.
+No cross-schema complexity, no external databases.
+"""
 
-import os
-from typing import List, Dict, Any, Optional
-import psycopg2
-from psycopg2.extras import RealDictCursor
-from contextlib import contextmanager
 import time
 import logging
+from typing import List, Dict, Any, Optional
+from datetime import datetime, date
+from decimal import Decimal
+import hashlib
+
+from database.connection import db
 
 
-class MultiSchemaConnection:
-    """Manages connections to multiple schemas/databases."""
-    
-    def __init__(self):
-        self.connections: Dict[str, Dict[str, psycopg2.extensions.connection]] = {}
-        self.configs = self._load_configs()
-        self.logger = logging.getLogger(__name__)
-    
-    def _load_configs(self) -> Dict[str, Dict]:
-        """Load database configurations for different schemas."""
-        return {
-            "sales": {
-                "host": os.getenv("SALES_DB_HOST", "localhost"),
-                "port": int(os.getenv("SALES_DB_PORT", 5432)),
-                "database": os.getenv("SALES_DB_NAME", "sales_db"),
-                "user": os.getenv("SALES_DB_USER", "sales_user"),
-                "password": os.getenv("SALES_DB_PASSWORD", ""),
-                "schema": "sales"
-            },
-            "analytics": {
-                "host": os.getenv("ANALYTICS_DB_HOST", "localhost"),
-                "port": int(os.getenv("ANALYTICS_DB_PORT", 5432)),
-                "database": os.getenv("ANALYTICS_DB_NAME", "analytics_db"),
-                "user": os.getenv("ANALYTICS_DB_USER", "analytics_user"),
-                "password": os.getenv("ANALYTICS_DB_PASSWORD", ""),
-                "schema": "analytics"
-            },
-            "ref": {
-                "host": os.getenv("REF_DB_HOST", "localhost"),
-                "port": int(os.getenv("REF_DB_PORT", 5432)),
-                "database": os.getenv("REF_DB_NAME", "ref_db"),
-                "user": os.getenv("REF_DB_USER", "ref_user"),
-                "password": os.getenv("REF_DB_PASSWORD", ""),
-                "schema": "ref"
-            }
-        }
-    
-    @contextmanager
-    def get_connection(self, schema: str = "default", tenant_id: str = "default"):
-        """Get connection for specific schema."""
-        conn_key = f"{tenant_id}_{schema}"
-        
-        if schema not in self.connections:
-            self.connections[schema] = {}
-        
-        if conn_key not in self.connections[schema]:
-            config = self.configs.get(schema, self.configs["sales"])
-            
-            self.logger.info(f"Connecting to {schema} schema...")
-            
-            conn = psycopg2.connect(
-                host=config["host"],
-                port=config["port"],
-                database=config["database"],
-                user=config["user"],
-                password=config["password"],
-                connect_timeout=10
-            )
-            
-            # Set search path if schema specified
-            if "schema" in config:
-                with conn.cursor() as cur:
-                    cur.execute(f"SET search_path TO {config['schema']}, public;")
-            
-            self.connections[schema][conn_key] = conn
-        
-        conn = self.connections[schema][conn_key]
-        try:
-            yield conn
-        except Exception as e:
-            conn.rollback()
-            raise e
-        else:
-            conn.commit()
-    
-    def get_connection_for_entity(self, entity_name: str, catalog, tenant_id: str = "default"):
-        """Get connection for a specific entity's schema."""
-        entity = catalog.get_entity(entity_name)
-        schema = entity.schema_name
-        
-        # Map schema names to connection configs
-        schema_map = {
-            "sales": "sales",
-            "analytics": "analytics",
-            "ref": "ref",
-            "public": "sales"  # Default
-        }
-        
-        connection_key = schema_map.get(schema, "sales")
-        return self.get_connection(connection_key, tenant_id)
-    
-    def close_all(self):
-        """Close all connections."""
-        for schema_conns in self.connections.values():
-            for conn in schema_conns.values():
-                try:
-                    conn.close()
-                except:
-                    pass
-        self.connections.clear()
-
-
-class SchemaAwareQueryExecutor:
+class QueryExecutor:
     """
-    Executes queries across multiple schemas.
-    Handles cross-schema joins by using fully qualified table names.
+    SIMPLIFIED: Executes queries on PostgreSQL.
     """
     
-    def __init__(self, connection_pool: MultiSchemaConnection = None):
-        self.connections = connection_pool or MultiSchemaConnection()
+    def __init__(self, use_cache: bool = True):
+        self.use_cache = use_cache
+        self.cache: Dict[str, Dict] = {}
         self.logger = logging.getLogger(__name__)
+        self.stats = {
+            "total_queries": 0,
+            "successful": 0,
+            "failed": 0,
+            "cache_hits": 0
+        }
     
-    def execute_cross_schema_query(
-        self,
-        sql: str,
-        schemas_involved: List[str],
-        tenant_id: str = "default"
-    ) -> Dict[str, Any]:
+    def _cache_key(self, sql: str) -> str:
+        """Generate simple cache key from SQL."""
+        return hashlib.md5(sql.encode()).hexdigest()[:16]
+    
+    def execute(self, sql: str) -> Dict[str, Any]:
         """
-        Execute query that involves multiple schemas.
-        Uses the primary schema's connection (first in list).
+        Execute SQL query on PostgreSQL.
+        Returns: {"success": bool, "data": list, "error": str, "metadata": dict}
         """
         start_time = time.time()
         
-        if not schemas_involved:
-            schemas_involved = ["sales"]  # Default
-        
-        primary_schema = schemas_involved[0]
+        # Check cache
+        if self.use_cache:
+            cache_key = self._cache_key(sql)
+            if cache_key in self.cache:
+                cached = self.cache[cache_key]
+                # Check if cache is still valid (5 minutes)
+                if time.time() - cached.get("cached_at", 0) < 300:
+                    self.stats["cache_hits"] += 1
+                    self.logger.info(f"Cache hit for query")
+                    return cached["result"]
         
         try:
-            with self.connections.get_connection(primary_schema, tenant_id) as conn:
-                # Set statement timeout
-                with conn.cursor() as cur:
-                    cur.execute("SET statement_timeout = 30000;")  # 30 seconds
-                
-                # Execute query
-                with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                    self.logger.info(f"Executing cross-schema query on {primary_schema}...")
-                    
-                    cur.execute(sql)
-                    rows = cur.fetchall()
-                    results = [dict(row) for row in rows]
-                    
-                    execution_time = time.time() - start_time
-                    
-                    return {
-                        "success": True,
-                        "data": results,
-                        "metadata": {
-                            "row_count": len(results),
-                            "execution_time_ms": round(execution_time * 1000, 2),
-                            "primary_schema": primary_schema,
-                            "schemas_involved": schemas_involved,
-                            "sql_hash": self._hash_sql(sql)
-                        }
-                    }
-        
+            self.logger.debug(f"Executing SQL: {sql[:200]}...")
+            
+            # Execute query
+            data = db.execute_query(sql)
+            
+            execution_time = time.time() - start_time
+            
+            result = {
+                "success": True,
+                "data": data,
+                "error": None,
+                "metadata": {
+                    "execution_time_ms": round(execution_time * 1000, 2),
+                    "row_count": len(data),
+                    "cache_hit": False,
+                    "timestamp": datetime.now().isoformat()
+                }
+            }
+            
+            # Cache successful results (only if not too large)
+            if self.use_cache and len(data) > 0 and len(data) <= 1000:
+                cache_key = self._cache_key(sql)
+                self.cache[cache_key] = {
+                    "result": result,
+                    "cached_at": time.time(),
+                    "row_count": len(data)
+                }
+                # Simple cache eviction
+                if len(self.cache) > 100:
+                    # Remove oldest
+                    oldest_key = min(self.cache.keys(), 
+                                   key=lambda k: self.cache[k]["cached_at"])
+                    del self.cache[oldest_key]
+            
+            self.stats["total_queries"] += 1
+            self.stats["successful"] += 1
+            
+            self.logger.info(f"Query executed in {execution_time:.2f}s, returned {len(data)} rows")
+            
+            return result
+            
         except Exception as e:
             execution_time = time.time() - start_time
-            self.logger.error(f"Cross-schema query failed: {str(e)}")
+            
+            error_msg = str(e)
+            self.logger.error(f"Query failed: {error_msg}")
+            
+            self.stats["total_queries"] += 1
+            self.stats["failed"] += 1
             
             return {
                 "success": False,
-                "error": str(e),
+                "data": [],
+                "error": error_msg,
                 "metadata": {
                     "execution_time_ms": round(execution_time * 1000, 2),
+                    "row_count": 0,
                     "error_type": type(e).__name__
                 }
             }
     
-    def test_schema_connections(self) -> Dict[str, bool]:
-        """Test connections to all configured schemas."""
-        results = {}
+    def execute_with_mock_data(self, sql: str) -> Dict[str, Any]:
+        """
+        Generate mock data for testing.
+        Use this when you don't have a real database.
+        """
+        self.logger.info("Using mock data (no PostgreSQL required)")
         
-        for schema in self.connections.configs.keys():
-            try:
-                with self.connections.get_connection(schema) as conn:
-                    with conn.cursor() as cur:
-                        cur.execute("SELECT 1")
-                        result = cur.fetchone()
-                        results[schema] = result[0] == 1
-            except Exception as e:
-                self.logger.error(f"Connection test failed for {schema}: {e}")
-                results[schema] = False
+        # Simple mock data based on query type
+        sql_lower = sql.lower()
         
-        return results
+        if "revenue" in sql_lower:
+            data = [
+                {"country": "US", "revenue": 150000.50},
+                {"country": "UK", "revenue": 85000.75},
+                {"country": "DE", "revenue": 65000.25}
+            ]
+        elif "order" in sql_lower:
+            data = [
+                {"month": "Jan", "orders": 1200},
+                {"month": "Feb", "orders": 1500},
+                {"month": "Mar", "orders": 1800}
+            ]
+        elif "user" in sql_lower:
+            data = [
+                {"segment": "enterprise", "users": 50},
+                {"segment": "premium", "users": 200},
+                {"segment": "free", "users": 1000}
+            ]
+        else:
+            data = [{"value": 100, "result": "mock_data"}]
+        
+        return {
+            "success": True,
+            "data": data,
+            "error": None,
+            "metadata": {
+                "execution_time_ms": 100,
+                "row_count": len(data),
+                "mock_data": True,
+                "note": "Using mock data - no database required"
+            }
+        }
     
-    def _hash_sql(self, sql: str) -> str:
-        """Generate hash for SQL."""
-        import hashlib
-        return hashlib.md5(sql.encode()).hexdigest()[:16]
+    def test_connection(self) -> bool:
+        """Test PostgreSQL connection."""
+        return db.test_connection()
+    
+    def clear_cache(self):
+        """Clear query cache."""
+        self.cache.clear()
+        self.logger.info("Query cache cleared")
+    
+    def get_stats(self) -> Dict[str, Any]:
+        """Get execution statistics."""
+        return {
+            **self.stats,
+            "cache_size": len(self.cache),
+            "database_connected": self.test_connection()
+        }
+
+
+# Global instance
+query_executor = QueryExecutor()
