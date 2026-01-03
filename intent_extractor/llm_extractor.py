@@ -50,11 +50,18 @@ class IntentExtractor:
         return """
         You are a semantic query intent extractor. Your ONLY job is to extract structured intent from natural language queries.
         
+        IMPORTANT: Use EXACTLY these dimension names (case-sensitive):
+        - "status" (NOT "order_status")
+        - "country" (NOT "user_country", "country_code")
+        - "segment" (NOT "user_segment", "customer_segment", "segment_name")
+        - "order_date" (for time dimensions)
+        - "full_name" (for customer names)
+        
         RULES:
         1. NEVER generate SQL, JOINs, or aggregation logic
         2. ONLY output valid JSON matching the exact schema below
         3. Extract metric names as they appear in the query (e.g., "revenue", "net profit", "user count")
-        4. Extract dimension names for grouping (e.g., "by country" -> ["country"])
+        4. Extract dimension names using EXACT names listed above
         5. Extract time ranges if mentioned (e.g., "last quarter" -> type: "last_quarter")
         6. Extract filters if specified (e.g., "where status is active" -> filter on "status" dimension)
         
@@ -86,15 +93,15 @@ class IntentExtractor:
         Output: {"metric": "net_profit", "dimensions": ["country"], "time_range": {"type": "last_quarter"}, "filters": [], "limit": 1000}
         
         Query: "Count of orders by product category where status is completed"
-        Output: {"metric": "order_count", "dimensions": ["product_category"], "time_range": null, "filters": [{"dimension": "order_status", "operator": "equals", "values": ["completed"]}], "limit": 1000}
+        Output: {"metric": "order_count", "dimensions": ["status"], "time_range": null, "filters": [{"dimension": "status", "operator": "equals", "values": ["completed"]}], "limit": 1000}
         
         Query: "Revenue for enterprise users in Q3 2023"
-        Output: {"metric": "revenue", "dimensions": [], "time_range": {"type": "custom", "start_date": "2023-07-01", "end_date": "2023-09-30"}, "filters": [{"dimension": "user_segment", "operator": "equals", "values": ["enterprise"]}], "limit": 1000}
+        Output: {"metric": "revenue", "dimensions": [], "time_range": {"type": "custom", "start_date": "2023-07-01", "end_date": "2023-09-30"}, "filters": [{"dimension": "segment", "operator": "equals", "values": ["enterprise"]}], "limit": 1000}
         
         Query: "Average order value by country and month for last year"
         Output: {"metric": "average_order_value", "dimensions": ["country", "order_date"], "time_range": {"type": "last_year"}, "filters": [], "limit": 1000}
         
-        REMEMBER: NO SQL, ONLY JSON. If unsure about a dimension name, use the most common business term.
+        REMEMBER: Use EXACT dimension names: status, country, segment, order_date, full_name. NO SQL, ONLY JSON.
         """
     
     def extract_intent(self, query: str) -> IntentExtractionResponse:
@@ -186,15 +193,15 @@ class IntentExtractor:
         elif "unique customer" in query_lower:
             intent_dict["metric"] = "unique_customers"
         
-        # Extract dimensions
-        if "by country" in query_lower:
+        # Extract dimensions - FIXED to use correct catalog names
+        if "by country" in query_lower or "by location" in query_lower:
             intent_dict["dimensions"].append("country")
         if "by product" in query_lower:
             intent_dict["dimensions"].append("product_category")
-        if "by segment" in query_lower:
-            intent_dict["dimensions"].append("user_segment")
-        if "by status" in query_lower:
-            intent_dict["dimensions"].append("order_status")
+        if "by segment" in query_lower or "user segment" in query_lower or "customer segment" in query_lower:
+            intent_dict["dimensions"].append("segment")  # Changed from "user_segment" to "segment"
+        if "by status" in query_lower or "order status" in query_lower:
+            intent_dict["dimensions"].append("status")  # Changed from "order_status" to "status"
         if "by month" in query_lower or "monthly" in query_lower:
             # Assuming metric has a time dimension
             intent_dict["dimensions"].append("order_date")
