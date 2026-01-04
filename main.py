@@ -1,5 +1,5 @@
 """
-SEMANTIC ANALYTICS ENGINE - WITH REAL POSTGRESQL DATA
+SEMANTIC ANALYTICS ENGINE - WITH REAL POSTGRESQL DATA & COMPARATIVE ANALYTICS
 """
 
 import os
@@ -10,25 +10,26 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, HTMLResponse
 import uvicorn
 import asyncio
+import json
 
 # Local imports
 from semantic_catalog.catalog import CATALOG
 from sql_compiler.compiler import SQLCompiler
 from intent_extractor.llm_extractor import IntentExtractor
-from intent_extractor.intent_models import QueryIntent, IntentExtractionResponse
+from intent_extractor.intent_models import QueryIntent, IntentExtractionResponse, TimeRange, FilterCondition
 from database.postgres_service import db_service
-from visualization.generator import VisualizationGenerator
+from analytics.comparative import ComparativeAnalyzer
 
 # ====================== INITIALIZE ======================
 
 intent_extractor = IntentExtractor()
 sql_compiler = SQLCompiler(CATALOG)
-visualizer = VisualizationGenerator()
+comparative_analyzer = None  # Will be initialized in startup
 
 # Create FastAPI app
 app = FastAPI(
     title="Semantic Analytics Engine",
-    description="Natural language to SQL with real PostgreSQL data",
+    description="Natural language to SQL with real PostgreSQL data and comparative analytics",
     version="1.0.0"
 )
 
@@ -41,214 +42,62 @@ app.add_middleware(
 )
 
 
-# ====================== LIFECYCLE EVENTS ======================
+# ====================== HELPER FUNCTIONS ======================
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize database connection on startup."""
-    print("🔄 Connecting to PostgreSQL database...")
-    try:
-        await db_service.connect()
-        
-        # Test connection
-        test_results = await db_service.test_sample_queries()
-        print("✅ Database connected successfully!")
-        print(f"   Customers: {test_results.get('customers', 'N/A')}")
-        print(f"   Orders: {test_results.get('orders', 'N/A')}")
-        
-    except Exception as e:
-        print(f"❌ Failed to connect to database: {e}")
-        print("⚠️  Falling back to mock data mode")
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Close database connection on shutdown."""
-    await db_service.close()
-    print("👋 Database connection closed")
-
-
-# ====================== API ENDPOINTS ======================
-
-@app.get("/")
-async def root():
-    return HTMLResponse("""
-    <html>
-    <head><title>Semantic Analytics Engine</title></head>
-    <body>
-        <h1>🚀 Semantic Analytics Engine</h1>
-        <p>Natural language → SQL → Visualization (with REAL PostgreSQL data)</p>
-        <h3>Try these queries:</h3>
-        <ul>
-            <li>Show me revenue by country</li>
-            <li>Order count by status</li>
-            <li>Average order value by customer segment</li>
-            <li>Total lifetime value by segment</li>
-        </ul>
-        <p><a href="/docs">API Documentation</a> | <a href="/health">Health Check</a></p>
-    </body>
-    </html>
-    """)
-
-
-@app.get("/health")
-async def health():
-    """Health check endpoint."""
-    try:
-        # Test database connection
-        test_results = await db_service.test_sample_queries()
-        db_status = "connected" if 'customers' in test_results else "disconnected"
-        
-        return {
-            "status": "healthy",
-            "timestamp": datetime.now().isoformat(),
-            "version": "1.0.0",
-            "database": db_status,
-            "sample_data": "customers" in test_results and "orders" in test_results
-        }
-    except Exception as e:
-        return {
-            "status": "degraded",
-            "timestamp": datetime.now().isoformat(),
-            "error": str(e),
-            "database": "disconnected"
-        }
-
-
-@app.get("/catalog")
-async def get_catalog():
-    """Get available metrics and dimensions."""
-    metrics = CATALOG.get_all_metrics()
-    dimensions = CATALOG.get_all_dimensions()
+def _safe_to_dict(obj):
+    """Safely convert object to dict, handling Pydantic models."""
+    if hasattr(obj, 'dict'):
+        return obj.dict()
+    elif hasattr(obj, '__dict__'):
+        return obj.__dict__
+    else:
+        return obj
     
-    return {
-        "metrics": metrics,
-        "dimensions": dimensions,
-        "timestamp": datetime.now().isoformat(),
-        "database_connected": True
+def _prepare_intent_dict(intent: QueryIntent, query: str) -> Dict:
+    """Convert intent to dict for comparative analyzer."""
+    # Start with basic fields
+    intent_dict = {
+        "metric": intent.metric,
+        "dimensions": intent.dimensions,
+        "limit": intent.limit,
+        "original_query": query
     }
-
-
-@app.post("/query")
-async def process_query(payload: Dict[str, Any]):
-    """
-    Process natural language query with REAL PostgreSQL data.
-    Returns clean data for React frontend.
-    """
-    query = payload.get("query", "").strip()
-    if not query:
-        raise HTTPException(status_code=400, detail="Query is required")
     
-    print(f"📝 Processing query: '{query}'")
+    # Handle time_range
+    if intent.time_range:
+        intent_dict["time_range"] = _safe_to_dict(intent.time_range)  # This returns a dict
+    else:
+        intent_dict["time_range"] = None
     
-    try:
-        # Step 1: Extract intent
-        intent_result = intent_extractor.extract_intent(query)
-        if not intent_result.success:
-            intent_result = intent_extractor.extract_intent_fallback(query)
-        
-        if not intent_result.success:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Could not understand query: {intent_result.error}"
-            )
-        
-        intent = intent_result.intent
-        print(f"   Intent: metric={intent.metric}, dimensions={intent.dimensions}")
-        
-        # Step 2: Generate SQL
-        sql_result = sql_compiler.compile_sql(intent)
-        sql = sql_result["sql"]
-        print(f"   Generated SQL: {sql}")
-        
-        # Step 3: Execute against PostgreSQL
-        print(f"   Executing SQL against PostgreSQL...")
-        try:
-            data = await db_service.execute_query(sql)
-            is_real_data = True
-            print(f"   Retrieved {len(data)} rows from database")
-        except Exception as db_error:
-            print(f"   Database query failed: {db_error}")
-            # Fallback to mock data
-            data = _generate_fallback_data(intent)
-            is_real_data = False
-        
-        # Step 4: Determine chart type (simple logic for React)
-        chart_type = "table"
-        if not intent.dimensions:
-            chart_type = "metric"
-        elif len(intent.dimensions) == 1:
-            chart_type = "bar"
-        
-        # Step 5: Return CLEAN response for React
-        return {
-            "success": True,
-            "query": {
-                "original": query,
-                "intent": intent.dict(),
-                "sql": sql
-            },
-            "data": data,
-            "chart_type": chart_type,
-            "metadata": {
-                "timestamp": datetime.now().isoformat(),
-                "row_count": len(data),
-                "real_data": is_real_data,
-                "columns": list(data[0].keys()) if data else []
-            }
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"❌ Query processing failed: {e}")
-        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-
-@app.post("/direct")
-async def direct_query(intent: QueryIntent):
-    """Direct query with structured intent."""
-    try:
-        sql_result = sql_compiler.compile_sql(intent)
-        sql = sql_result["sql"]
-        
-        data = await db_service.execute_query(sql)
-        
-        visualization = visualizer.generate_visualization(
-            data=data,
-            dimensions=intent.dimensions,
-            metric_name=intent.metric,
-            query_title=f"{intent.metric.replace('_', ' ').title()}"
-        )
-        
-        return {
-            "intent": intent.dict(),
-            "sql": sql,
-            "data": data,
-            "visualization": visualization,
-            "real_data": True
-        }
-        
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/execute-sql")
-async def execute_sql(payload: Dict[str, Any]):
-    """Execute raw SQL (for testing)."""
-    sql = payload.get("sql", "").strip()
-    if not sql:
-        raise HTTPException(status_code=400, detail="SQL is required")
+    # Handle filters
+    if intent.filters:
+        intent_dict["filters"] = [_safe_to_dict(f) for f in intent.filters]
+    else:
+        intent_dict["filters"] = []
     
-    try:
-        data = await db_service.execute_query(sql)
-        return {
-            "success": True,
-            "sql": sql,
-            "data": data,
-            "row_count": len(data)
-        }
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # Handle comparative
+    if intent.comparative:
+        intent_dict["comparative"] = intent.comparative.value
+    else:
+        intent_dict["comparative"] = None
+    
+    return intent_dict
 
+
+def _determine_chart_type(intent: QueryIntent, is_comparative: bool = False) -> str:
+    """Determine chart type based on intent."""
+    if is_comparative:
+        if intent.dimensions:
+            return "comparative_bar"
+        else:
+            return "metric_comparison"
+    
+    if not intent.dimensions:
+        return "metric_card"
+    elif len(intent.dimensions) == 1:
+        return "bar"
+    else:
+        return "table"
 
 def _generate_fallback_data(intent: QueryIntent) -> List[Dict]:
     """Generate fallback mock data when database fails."""
@@ -293,6 +142,261 @@ def _generate_fallback_data(intent: QueryIntent) -> List[Dict]:
             data.append({metric: random.randint(1000, 10000)})
     
     return data
+
+
+# ====================== LIFECYCLE EVENTS ======================
+
+@app.on_event("startup")
+async def startup_event():
+    """Initialize database connection on startup."""
+    print("🔄 Connecting to PostgreSQL database...")
+    try:
+        await db_service.connect()
+        
+        # Test connection
+        test_results = await db_service.test_sample_queries()
+        print("✅ Database connected successfully!")
+        print(f"   Customers: {test_results.get('customers', 'N/A')}")
+        print(f"   Orders: {test_results.get('orders', 'N/A')}")
+        
+        # Initialize comparative analyzer
+        global comparative_analyzer
+        comparative_analyzer = ComparativeAnalyzer(db_service)
+        print("✅ Comparative analytics module loaded")
+        
+    except Exception as e:
+        print(f"❌ Failed to connect to database: {e}")
+        print("⚠️  Falling back to mock data mode")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Close database connection on shutdown."""
+    await db_service.close()
+    print("👋 Database connection closed")
+
+
+# ====================== API ENDPOINTS ======================
+
+@app.get("/")
+async def root():
+    return HTMLResponse("""
+    <html>
+    <head><title>Semantic Analytics Engine</title></head>
+    <body>
+        <h1>🚀 Semantic Analytics Engine</h1>
+        <p>Natural language → SQL → Visualization (with REAL PostgreSQL data)</p>
+        <h3>Try these queries:</h3>
+        <ul>
+            <li>Show me revenue by country</li>
+            <li>How much did revenue increase compared to last year?</li>
+            <li>Show me MoM growth by country</li>
+            <li>Compare this quarter to last quarter</li>
+            <li>Order count by status</li>
+            <li>Average order value by customer segment</li>
+        </ul>
+        <p><a href="/docs">API Documentation</a> | <a href="/health">Health Check</a></p>
+    </body>
+    </html>
+    """)
+
+
+@app.get("/health")
+async def health():
+    """Health check endpoint."""
+    try:
+        # Test database connection
+        test_results = await db_service.test_sample_queries()
+        db_status = "connected" if 'customers' in test_results else "disconnected"
+        
+        return {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "version": "1.0.0",
+            "database": db_status,
+            "sample_data": "customers" in test_results and "orders" in test_results,
+            "comparative_analytics": "loaded" if comparative_analyzer else "not_loaded"
+        }
+    except Exception as e:
+        return {
+            "status": "degraded",
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e),
+            "database": "disconnected"
+        }
+
+
+@app.get("/catalog")
+async def get_catalog():
+    """Get available metrics and dimensions."""
+    metrics = CATALOG.get_all_metrics()
+    dimensions = CATALOG.get_all_dimensions()
+    
+    return {
+        "metrics": metrics,
+        "dimensions": dimensions,
+        "timestamp": datetime.now().isoformat(),
+        "database_connected": True,
+        "comparative_supported": True
+    }
+
+
+@app.post("/query")
+async def process_query(payload: Dict[str, Any]):
+    """
+    Process natural language query with REAL PostgreSQL data.
+    Returns clean data for React frontend.
+    """
+    query = payload.get("query", "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="Query is required")
+    
+    print(f"📝 Processing query: '{query}'")
+    
+    try:
+        # Step 1: Extract intent
+        intent_result = intent_extractor.extract_intent(query)
+        if not intent_result.success:
+            intent_result = intent_extractor.extract_intent_fallback(query)
+        
+        if not intent_result.success:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Could not understand query: {intent_result.error}"
+            )
+        
+        intent = intent_result.intent
+        
+        print(f"   Intent: metric={intent.metric}, dimensions={intent.dimensions}, comparative={intent.comparative}")
+        
+        # Step 2: Generate base SQL
+        sql_result = sql_compiler.compile_sql(intent)
+        base_sql = sql_result["sql"]
+        print(f"   Generated base SQL: {base_sql[:200]}...")
+        
+        # Step 3: Check for comparative analysis
+        is_comparative = False
+        sql = base_sql
+        
+        # Prepare intent dict safely
+        intent_dict = _prepare_intent_dict(intent, query)
+        
+        # Debug: Print intent_dict to see structure
+        print(f"   Intent dict prepared: {json.dumps(intent_dict, default=str)}")
+        
+        # Check if we should do comparative analysis
+        should_do_comparative = (
+            intent.comparative is not None or 
+            any(word in query.lower() for word in ['compared', 'growth', 'increase', 'decrease', 'change', 'yoy', 'mom', 'qoq'])
+        )
+        
+        if should_do_comparative and comparative_analyzer:
+            print(f"📈 Processing comparative analysis for query: {query}")
+            
+            try:
+                comparative_result = await comparative_analyzer.analyze_comparative(
+                    intent_dict, base_sql
+                )
+                
+                if comparative_result.get("comparative"):
+                    sql = comparative_result["sql"]
+                    is_comparative = True
+                    print(f"   Using comparative SQL: {sql[:200]}...")
+                else:
+                    print(f"   Comparative analysis not applicable: {comparative_result.get('message')}")
+                    
+            except Exception as comp_error:
+                print(f"   Comparative analysis failed: {comp_error}")
+                # Continue with base SQL
+        
+        # Step 4: Execute against PostgreSQL
+        print(f"   Executing SQL against PostgreSQL...")
+        try:
+            if is_comparative:
+                data = await comparative_analyzer.execute_comparative_query(sql)
+            else:
+                data = await db_service.execute_query(sql)
+            
+            is_real_data = True
+            print(f"   Retrieved {len(data)} rows from database")
+                
+        except Exception as db_error:
+            print(f"   Database query failed: {db_error}")
+            # Fallback to mock data
+            data = _generate_fallback_data(intent)
+            is_real_data = False
+        
+        # Step 5: Determine chart type
+        chart_type = _determine_chart_type(intent, is_comparative)
+        
+        # Step 6: Return CLEAN response for React
+        response = {
+            "success": True,
+            "query": {
+                "original": query,
+                "intent": intent.dict(),
+                "sql": sql,
+                "is_comparative": is_comparative,
+                "comparative_type": intent.comparative.value if intent.comparative else None
+            },
+            "data": data,
+            "chart_type": chart_type,
+            "metadata": {
+                "timestamp": datetime.now().isoformat(),
+                "row_count": len(data),
+                "real_data": is_real_data,
+                "columns": list(data[0].keys()) if data else [],
+                "comparative_analysis": is_comparative
+            }
+        }
+        
+        return response
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"❌ Query processing failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
+
+
+@app.post("/direct")
+async def direct_query(intent: QueryIntent):
+    """Direct query with structured intent."""
+    try:
+        sql_result = sql_compiler.compile_sql(intent)
+        sql = sql_result["sql"]
+        
+        data = await db_service.execute_query(sql)
+        
+        return {
+            "intent": intent.dict(),
+            "sql": sql,
+            "data": data,
+            "real_data": True
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/execute-sql")
+async def execute_sql(payload: Dict[str, Any]):
+    """Execute raw SQL (for testing)."""
+    sql = payload.get("sql", "").strip()
+    if not sql:
+        raise HTTPException(status_code=400, detail="SQL is required")
+    
+    try:
+        data = await db_service.execute_query(sql)
+        return {
+            "success": True,
+            "sql": sql,
+            "data": data,
+            "row_count": len(data)
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

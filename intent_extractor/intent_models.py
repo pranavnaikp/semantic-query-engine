@@ -22,6 +22,16 @@ class TimeRangeType(str, Enum):
     CUSTOM = "custom"
 
 
+class ComparativeType(str, Enum):  # NEW: Add this enum
+    """Types of comparative analysis."""
+    YEAR_OVER_YEAR = "yoy"
+    MONTH_OVER_MONTH = "mom"
+    QUARTER_OVER_QUARTER = "qoq"
+    WEEK_OVER_WEEK = "wow"
+    VS_PREVIOUS_PERIOD = "previous"
+    VS_BUDGET = "budget"
+
+
 class TimeRange(BaseModel):
     """Time range specification for queries."""
     type: TimeRangeType = Field(..., description="Type of time range")
@@ -70,12 +80,29 @@ class QueryIntent(BaseModel):
         ge=1,
         le=10000
     )
+    comparative: Optional[ComparativeType] = Field(  # NEW: Add this field
+        None,
+        description="Type of comparative analysis (e.g., yoy, mom, qoq)"
+    )
+    original_query: Optional[str] = Field(  # NEW: Add this field (optional)
+        None,
+        description="Original natural language query (for reference)"
+    )
     
     @validator('dimensions')
     def validate_dimensions(cls, v):
         """Ensure dimensions are unique."""
         if len(v) != len(set(v)):
             raise ValueError("Dimensions must be unique")
+        return v
+    
+    @validator('comparative')
+    def validate_comparative_with_time_range(cls, v, values):
+        """Validate comparative analysis makes sense with time range."""
+        if v and values.get('time_range'):
+            # If comparative analysis is requested, time_range should be appropriate
+            # For example, yoy might override specific time_range
+            pass
         return v
 
 

@@ -143,7 +143,8 @@ class SQLCompiler:
         
         return "\n".join(from_parts)
     
-    def _build_time_filter(self, time_range: Dict, entity) -> Optional[str]:
+
+    def _build_time_filter(self, time_range, entity) -> Optional[str]:
         """Build time filter SQL."""
         if not time_range or not entity:
             return None
@@ -158,20 +159,29 @@ class SQLCompiler:
         if not time_dim:
             return None
         
-        if time_range["type"] == "last_quarter":
+        # Handle both TimeRange Pydantic object and dict
+        if hasattr(time_range, 'type'):
+            # It's a TimeRange Pydantic object
+            time_range_type = time_range.type.value  # Get string value from enum
+            start_date = time_range.start_date
+            end_date = time_range.end_date
+        else:
+            # It's a dict
+            time_range_type = time_range.get("type")
+            start_date = time_range.get("start_date")
+            end_date = time_range.get("end_date")
+        
+        if time_range_type == "last_quarter":
             return f"{time_dim.column_name} >= CURRENT_DATE - INTERVAL '3 months'"
-        elif time_range["type"] == "last_month":
+        elif time_range_type == "last_month":
             return f"{time_dim.column_name} >= CURRENT_DATE - INTERVAL '1 month'"
-        elif time_range["type"] == "last_year":
+        elif time_range_type == "last_year":
             return f"{time_dim.column_name} >= CURRENT_DATE - INTERVAL '1 year'"
-        elif time_range["type"] == "custom":
-            start = time_range.get("start_date")
-            end = time_range.get("end_date")
-            if start and end:
-                return f"{time_dim.column_name} BETWEEN '{start}' AND '{end}'"
+        elif time_range_type == "custom" and start_date and end_date:
+            return f"{time_dim.column_name} BETWEEN '{start_date}' AND '{end_date}'"
         
         return None
-    
+
     def _build_filter_sql(self, filter_obj: Dict) -> Optional[str]:
         """Build filter SQL from filter object."""
         dimension = filter_obj.get("dimension")
