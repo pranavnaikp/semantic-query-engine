@@ -24,7 +24,7 @@ from analytics.comparative import ComparativeAnalyzer
 
 intent_extractor = IntentExtractor()
 sql_compiler = SQLCompiler(CATALOG)
-comparative_analyzer = None  # Will be initialized in startup
+comparative_analyzer = None
 
 # Create FastAPI app
 app = FastAPI(

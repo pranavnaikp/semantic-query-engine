@@ -80,20 +80,60 @@ class ComparativeAnalyzer:
         dimensions = intent_dict.get("dimensions", [])
 
         if comparison_type == "yoy":
-            return self._generate_yoy_sql(metric, dimensions)
+            return self._generate_yoy_sql(metric, dimensions, intent_dict)
         elif comparison_type == "mom":
-            return self._generate_mom_sql(metric, dimensions)
+            return self._generate_mom_sql(metric, dimensions, intent_dict)
         elif comparison_type == "qoq":
-            return self._generate_qoq_sql(metric, dimensions)
+            return self._generate_qoq_sql(metric, dimensions, intent_dict)
 
         # Fallback to simple comparison
-        return self._generate_simple_comparison_sql(metric, dimensions)
+        return self._generate_simple_comparison_sql(metric, dimensions, intent_dict)
 
-    def _generate_yoy_sql(self, metric: str, dimensions: List[str]) -> str:
-        """Generate Year-Over-Year comparison SQL."""
+    def _extract_years_from_intent(self, intent_dict: Dict) -> tuple:
+        """Extract years from intent dictionary."""
+        # Default to current year logic
         current_year = datetime.now().year
         previous_year = current_year - 1
+        
+        # Try to get years from custom time_range
+        time_range = intent_dict.get("time_range")
+        if time_range and time_range.get("type") == "custom":
+            start_date = time_range.get("start_date")
+            end_date = time_range.get("end_date")
+            
+            if start_date and end_date:
+                try:
+                    # Parse dates
+                    if isinstance(start_date, str):
+                        start_year = int(start_date.split('-')[0])
+                    else:
+                        start_year = start_date.year
+                    
+                    if isinstance(end_date, str):
+                        end_year = int(end_date.split('-')[0])
+                    else:
+                        end_year = end_date.year
+                    
+                    # Determine which years to compare
+                    if end_year > start_year:
+                        # If we have a range like 2023-2024, compare those years
+                        current_year = end_year
+                        previous_year = start_year
+                    else:
+                        # If same year or invalid, fall back to default
+                        pass
+                        
+                except Exception as e:
+                    print(f"Error extracting years from time_range: {e}")
+        
+        print(f"DEBUG: Using years {previous_year} vs {current_year} for YoY comparison")
+        return previous_year, current_year
 
+    def _generate_yoy_sql(self, metric: str, dimensions: List[str], intent_dict: Dict = None) -> str:
+        """Generate Year-Over-Year comparison SQL."""
+        # Extract years from intent_dict if available
+        previous_year, current_year = self._extract_years_from_intent(intent_dict or {})
+        
         # Build SELECT clause
         select_parts = []
 
@@ -171,8 +211,9 @@ class ComparativeAnalyzer:
         if "segment" in dimensions:
             from_clause += "\nLEFT JOIN analytics.customer_segments ON sales.orders.customer_id = analytics.customer_segments.customer_id"
 
-        # Add WHERE clause for last 2 years
+        # Update WHERE clause to use extracted years
         from_clause += f"\nWHERE order_date >= DATE '{previous_year}-01-01'"
+        from_clause += f"\n  AND order_date <= DATE '{current_year}-12-31'"
 
         # Build GROUP BY
         group_by_clause = ""
@@ -190,7 +231,7 @@ class ComparativeAnalyzer:
 
         return sql
 
-    def _generate_mom_sql(self, metric: str, dimensions: List[str]) -> str:
+    def _generate_mom_sql(self, metric: str, dimensions: List[str], intent_dict: Dict = None) -> str:
         """Generate Month-Over-Month comparison SQL."""
         select_parts = []
 
@@ -233,7 +274,17 @@ class ComparativeAnalyzer:
         if "segment" in dimensions:
             from_clause += "\nLEFT JOIN analytics.customer_segments ON sales.orders.customer_id = analytics.customer_segments.customer_id"
 
-        from_clause += "\nWHERE order_date >= CURRENT_DATE - INTERVAL '6 months'"
+        # Extract date range from intent_dict if available
+        time_range = (intent_dict or {}).get("time_range")
+        if time_range and time_range.get("type") == "custom":
+            start_date = time_range.get("start_date")
+            end_date = time_range.get("end_date")
+            if start_date and end_date:
+                from_clause += f"\nWHERE order_date >= DATE '{start_date}' AND order_date <= DATE '{end_date}'"
+            else:
+                from_clause += "\nWHERE order_date >= CURRENT_DATE - INTERVAL '6 months'"
+        else:
+            from_clause += "\nWHERE order_date >= CURRENT_DATE - INTERVAL '6 months'"
 
         # Build GROUP BY
         group_by = ""
@@ -251,7 +302,7 @@ class ComparativeAnalyzer:
 
         return sql
 
-    def _generate_qoq_sql(self, metric: str, dimensions: List[str]) -> str:
+    def _generate_qoq_sql(self, metric: str, dimensions: List[str], intent_dict: Dict = None) -> str:
         """Generate Quarter-Over-Quarter comparison SQL."""
         select_parts = []
 
@@ -298,7 +349,17 @@ class ComparativeAnalyzer:
         if "segment" in dimensions:
             from_clause += "\nLEFT JOIN analytics.customer_segments ON sales.orders.customer_id = analytics.customer_segments.customer_id"
 
-        from_clause += "\nWHERE order_date >= CURRENT_DATE - INTERVAL '1 year'"
+        # Extract date range from intent_dict if available
+        time_range = (intent_dict or {}).get("time_range")
+        if time_range and time_range.get("type") == "custom":
+            start_date = time_range.get("start_date")
+            end_date = time_range.get("end_date")
+            if start_date and end_date:
+                from_clause += f"\nWHERE order_date >= DATE '{start_date}' AND order_date <= DATE '{end_date}'"
+            else:
+                from_clause += "\nWHERE order_date >= CURRENT_DATE - INTERVAL '1 year'"
+        else:
+            from_clause += "\nWHERE order_date >= CURRENT_DATE - INTERVAL '1 year'"
 
         # Build GROUP BY
         group_by = ""
@@ -316,10 +377,10 @@ class ComparativeAnalyzer:
 
         return sql
 
-    def _generate_simple_comparison_sql(self, metric: str, dimensions: List[str]) -> str:
+    def _generate_simple_comparison_sql(self, metric: str, dimensions: List[str], intent_dict: Dict = None) -> str:
         """Generate simple comparison SQL."""
-        current_year = datetime.now().year
-        previous_year = current_year - 1
+        # Extract years from intent_dict if available
+        previous_year, current_year = self._extract_years_from_intent(intent_dict or {})
 
         select_parts = []
 
@@ -349,7 +410,8 @@ class ComparativeAnalyzer:
         if "segment" in dimensions:
             from_clause += "\nLEFT JOIN analytics.customer_segments ON sales.orders.customer_id = analytics.customer_segments.customer_id"
 
-        from_clause += f"\nWHERE EXTRACT(YEAR FROM order_date) IN ({current_year}, {previous_year})"
+        # Use extracted years in WHERE clause
+        from_clause += f"\nWHERE EXTRACT(YEAR FROM order_date) IN ({previous_year}, {current_year})"
 
         # Build GROUP BY
         group_by_clause = ""
